@@ -60,6 +60,7 @@
 #include "sql_show.h"                           // opt_ignore_db_dirs
 #include "table_cache.h"                        // Table_cache_manager
 #include "my_aes.h" // my_aes_opmode_names
+#include "sql_multi_tenancy.h"
 
 #include "log_event.h"
 #include "binlog.h"
@@ -3153,6 +3154,19 @@ static Sys_var_enum Slave_exec_mode(
        "between the master and the slave",
        GLOBAL_VAR(slave_exec_mode_options), CMD_LINE(REQUIRED_ARG),
        slave_exec_mode_names, DEFAULT(SLAVE_EXEC_MODE_STRICT));
+static const char *slave_use_idempotent_for_recovery_names[]=
+       {"NO", "YES", 0};
+static Sys_var_enum Slave_use_idempotent_for_recovery(
+       "slave_use_idempotent_for_recovery",
+       "Modes for how replication events should be executed during recovery. "
+       "Legal values are NO (default) and YES. YES means "
+       "replication will not stop for operations that are idempotent. "
+       "Note that binlog format must be ROW and GTIDs should be enabled "
+       "for this option to have effect.",
+       GLOBAL_VAR(slave_use_idempotent_for_recovery_options),
+       CMD_LINE(REQUIRED_ARG),
+       slave_use_idempotent_for_recovery_names,
+       DEFAULT(SLAVE_USE_IDEMPOTENT_FOR_RECOVERY_NO));
 static const char *slave_run_triggers_for_rbr_names[]=
   {"NO", "YES", "LOGGING", 0};
 static Sys_var_enum Slave_run_triggers_for_rbr(
@@ -3210,6 +3224,12 @@ static Sys_var_set Admission_control_options(
        GLOBAL_VAR(admission_control_filter), CMD_LINE(REQUIRED_ARG),
        admission_control_filter_names,
        DEFAULT(0));
+
+static Sys_var_mybool Sys_admission_control_by_trx(
+       "admission_control_by_trx",
+       "Allow open transactions to go through admission control",
+       GLOBAL_VAR(opt_admission_control_by_trx), CMD_LINE(OPT_ARG),
+       DEFAULT(FALSE));
 
 static Sys_var_mybool Sys_slave_sql_verify_checksum(
        "slave_sql_verify_checksum",
@@ -4954,6 +4974,19 @@ static Sys_var_ulong Sys_slave_parallel_workers(
        "Number of worker threads for executing events in parallel ",
        GLOBAL_VAR(opt_mts_slave_parallel_workers), CMD_LINE(REQUIRED_ARG),
        VALID_RANGE(0, MTS_MAX_WORKERS), DEFAULT(0), BLOCK_SIZE(1));
+
+static Sys_var_mybool Sys_mts_dynamic_rebalance(
+       "mts_dynamic_rebalance",
+       "Shuffle DB's within workers periodically for load balancing",
+       GLOBAL_VAR(opt_mts_dynamic_rebalance),
+       CMD_LINE(OPT_ARG), DEFAULT(FALSE));
+
+static Sys_var_double Sys_mts_imbalance_threshold(
+       "mts_imbalance_threshold",
+       "Threshold to trigger worker thread rebalancing. This parameter "
+       "denotes the percent load on the most loaded worker.",
+       GLOBAL_VAR(opt_mts_imbalance_threshold),
+       CMD_LINE(OPT_ARG), VALID_RANGE(0, 100), DEFAULT(90));
 
 static Sys_var_ulonglong Sys_mts_pending_jobs_size_max(
        "slave_pending_jobs_size_max",

@@ -76,6 +76,7 @@
 #include "debug_sync.h"
 #include "sql_callback.h"
 #include "opt_trace_context.h"
+#include "sql_multi_tenancy.h"
 
 #include "global_threads.h"
 #include "mysqld.h"
@@ -648,10 +649,13 @@ ulong open_files_limit, max_binlog_size, max_relay_log_size;
 ulong slave_trans_retries;
 uint  slave_net_timeout;
 ulong slave_exec_mode_options;
+ulong slave_use_idempotent_for_recovery_options = 0;
 ulong slave_run_triggers_for_rbr = 0;
 ulonglong slave_type_conversions_options;
 ulonglong admission_control_filter;
 ulong opt_mts_slave_parallel_workers;
+my_bool opt_mts_dynamic_rebalance;
+double opt_mts_imbalance_threshold;
 ulonglong opt_mts_pending_jobs_size_max;
 ulonglong slave_rows_search_algorithms_options;
 #ifndef DBUG_OFF
@@ -683,7 +687,8 @@ ulong binlog_stmt_cache_use= 0, binlog_stmt_cache_disk_use= 0;
 ulong max_connections, max_connect_errors;
 uint max_nonsuper_connections;
 ulong opt_max_running_queries, opt_max_waiting_queries;
-AC *db_ac;
+my_bool opt_admission_control_by_trx= 0;
+extern AC *db_ac;
 ulong rpl_stop_slave_timeout= LONG_TIMEOUT;
 my_bool log_bin_use_v1_row_events= 0;
 bool thread_cache_size_specified= false;
@@ -10354,7 +10359,7 @@ SHOW_VAR status_vars[]= {
   {"Table_open_cache_overflows",(char*) offsetof(STATUS_VAR, table_open_cache_overflows), SHOW_LONGLONG_STATUS},
 #ifdef HAVE_MMAP
   {"Tc_log_max_pages_used",    (char*) &tc_log_max_pages_used,  SHOW_LONG},
-  {"Tc_log_page_size",         (char*) &tc_log_page_size,       SHOW_LONG},
+  {"Tc_log_page_size",         (char*) &tc_log_page_size,       SHOW_LONG_NOFLUSH},
   {"Tc_log_page_waits",        (char*) &tc_log_page_waits,      SHOW_LONG},
 #endif
   {"Threads_binlog_client",    (char*) &thread_binlog_client,   SHOW_INT},

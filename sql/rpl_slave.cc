@@ -454,6 +454,8 @@ int init_slave()
     rli->get_event_relay_log_name(),
     (ulong) rli->get_event_relay_log_pos()));
 
+  rli->recovery_max_engine_gtid= mysql_bin_log.engine_binlog_max_gtid;
+
   if (active_mi->host[0] &&
       mysql_bin_log.engine_binlog_pos != ULONGLONG_MAX &&
       mysql_bin_log.engine_binlog_file[0] &&
@@ -5243,6 +5245,53 @@ int check_temp_dir(char* tmp_file)
   DBUG_RETURN(0);
 }
 
+static std::pair<ulong, ulonglong> cleanup_worker_jobs(Slave_worker *w)
+{
+  ulong                   ii= 0;
+  ulong                   current_event_index;
+  ulong                   purge_cnt= 0;
+  ulonglong               purge_size= 0;
+  struct slave_job_item   job_item;
+  std::vector<Log_event*> log_event_free_list;
+
+  mysql_mutex_lock(&w->jobs_lock);
+
+  log_event_free_list.reserve(w->jobs.avail);
+
+  current_event_index = std::max(w->last_current_event_index,
+                                 w->current_event_index);
+  while (de_queue(&w->jobs, &job_item))
+  {
+    DBUG_ASSERT(job_item.data);
+
+    Log_event* log_event= static_cast<Log_event*>(job_item.data);
+
+    ii++;
+    if (ii > current_event_index)
+    {
+      purge_size += log_event->data_written;
+      purge_cnt++;
+    }
+
+    // Save the freeing for outside the mutex
+    log_event_free_list.push_back(log_event);
+  }
+
+  DBUG_ASSERT(w->jobs.len == 0);
+
+  mysql_mutex_unlock(&w->jobs_lock);
+
+  // Do all the freeing outside the mutex since freeing causes destructors to
+  // be called and some destructors acquire locks which can cause deadlock
+  // scenarios if we are holding this mutex.
+  for (Log_event* log_event : log_event_free_list)
+  {
+    delete log_event;
+  }
+
+  // Return the number and size of the purged events
+  return std::make_pair(purge_cnt, purge_size);
+}
 /*
   Worker thread for the parallel execution of the replication events.
 */
@@ -5255,9 +5304,6 @@ pthread_handler_t handle_slave_worker(void *arg)
   Relay_log_info* rli= w->c_rli;
   ulong purge_cnt= 0;
   ulonglong purge_size= 0;
-  ulong current_event_index = 0;
-  ulong i = 0;
-  struct slave_job_item _item, *job_item= &_item;
   /* Buffer lifetime extends across the entire runtime of the THD handle. */
   char proc_info_buf[256]= {0};
 
@@ -5319,25 +5365,7 @@ pthread_handler_t handle_slave_worker(void *arg)
   thd->clear_error();
   w->cleanup_context(thd, error);
 
-  mysql_mutex_lock(&w->jobs_lock);
-
-  current_event_index = max(w->last_current_event_index,
-                            w->current_event_index);
-  while(de_queue(&w->jobs, job_item))
-  {
-    i++;
-    if (i > current_event_index)
-    {
-      purge_size += ((Log_event*) (job_item->data))->data_written;
-      purge_cnt++;
-    }
-    DBUG_ASSERT(job_item->data);
-    delete static_cast<Log_event*>(job_item->data);
-  }
-
-  DBUG_ASSERT(w->jobs.len == 0);
-
-  mysql_mutex_unlock(&w->jobs_lock);
+  std::tie(purge_cnt, purge_size)= cleanup_worker_jobs(w);
 
   mysql_mutex_lock(&rli->pending_jobs_lock);
   rli->pending_jobs -= purge_cnt;
@@ -5772,6 +5800,13 @@ bool mts_checkpoint_routine(Relay_log_info *rli, ulonglong period,
   if (cnt == 0)
     goto end;
 
+  // case: rebalance workers should be called only when the current event
+  // in the coordinator is a begin or gtid event
+  if (!force && opt_mts_dynamic_rebalance == TRUE &&
+      !rli->curr_group_seen_begin && !rli->curr_group_seen_gtid)
+  {
+    rebalance_workers(rli);
+  }
 
   /* TODO: 
      to turn the least occupied selection in terms of jobs pieces
@@ -5783,6 +5818,19 @@ bool mts_checkpoint_routine(Relay_log_info *rli, ulonglong period,
     set_dynamic(&rli->least_occupied_workers, (uchar*) &w_i->jobs.len, w_i->id);
   };
   sort_dynamic(&rli->least_occupied_workers, (qsort_cmp) ulong_cmp);
+
+  if (DBUG_EVALUATE_IF("skip_checkpoint_load_reset", 0, 1))
+  {
+    // reset the database load
+    mysql_mutex_lock(&slave_worker_hash_lock);
+    for (uint i= 0; i < mapping_db_to_worker.records; ++i)
+    {
+      db_worker_hash_entry *entry=
+        (db_worker_hash_entry*) my_hash_element(&mapping_db_to_worker, i);
+      entry->load= 0;
+    }
+    mysql_mutex_unlock(&slave_worker_hash_lock);
+  }
 
   if (need_data_lock)
     mysql_mutex_lock(&rli->data_lock);
@@ -7924,7 +7972,10 @@ static Log_event* next_event(Relay_log_info* rli)
          MTS checkpoint in the successful read branch 
       */
       bool force= (rli->checkpoint_seqno > (rli->checkpoint_group - 1));
-      if (rli->is_parallel_exec() && (opt_mts_checkpoint_period != 0 || force))
+      bool period_check= opt_mts_checkpoint_period != 0 &&
+                         !rli->curr_group_seen_begin &&
+                         !rli->curr_group_seen_gtid;
+      if (rli->is_parallel_exec() && (period_check || force))
       {
         ulonglong period= static_cast<ulonglong>(opt_mts_checkpoint_period * 1000000ULL);
         mysql_mutex_unlock(&rli->data_lock);

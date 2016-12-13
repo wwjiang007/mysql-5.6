@@ -73,7 +73,8 @@ struct Rdb_trx_info {
   ulonglong lock_count;
   int timeout_sec;
   std::string state;
-  ulonglong waiting_trx_id;
+  std::string waiting_key;
+  ulonglong waiting_cf_id;
   int is_replication;
   int skip_trx_api;
   int read_only;
@@ -904,6 +905,9 @@ private:
     __attribute__((__nonnull__, __warn_unused_result__));
   void read_thd_vars(THD *thd)
     __attribute__((__nonnull__));
+  const char* thd_rocksdb_tmpdir()
+    __attribute__((__nonnull__, __warn_unused_result__));
+
   bool contains_foreign_key(THD* thd)
     __attribute__((__nonnull__, __warn_unused_result__));
 

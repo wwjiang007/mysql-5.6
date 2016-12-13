@@ -164,7 +164,7 @@ our $opt_vs_config = $ENV{'MTR_VS_CONFIG'};
 
 # If you add a new suite, please check TEST_DIRS in Makefile.am.
 #
-my $DEFAULT_SUITES= "main,sys_vars,binlog,federated,rpl,innodb,innodb_fts,innodb_zip,perfschema,funcs_1,opt_trace,parts,auth_sec,innodb_stress,json";
+my $DEFAULT_SUITES= "main,sys_vars,binlog,federated,rpl,rpl_recovery,innodb,innodb_fts,innodb_zip,perfschema,funcs_1,opt_trace,parts,auth_sec,innodb_stress,json";
 my $opt_suites;
 
 our $opt_verbose= 0;  # Verbose output, enable with --verbose
@@ -3672,6 +3672,7 @@ sub mysql_install_db {
         $temp_extra_opt =~ /--innodb-log-file-size/ || 
         $temp_extra_opt =~ /--skip-innodb/ ||
         $temp_extra_opt =~ /--rocksdb/ ||
+        $temp_extra_opt =~ /--allow-multiple-engines/ ||
         $temp_extra_opt =~ /--default-tmp-storage-engine/ ||
         $temp_extra_opt =~ /--default-storage-engine/) {
       mtr_add_arg($args, $extra_opt);
@@ -3869,6 +3870,12 @@ sub do_before_run_mysqltest($)
     # Set environment variable NDB_STATUS_OK to YES
     # if script decided to run mysqltest cluster _is_ installed ok
     $ENV{'NDB_STATUS_OK'} = "YES";
+  }
+
+  # Clear out the 'restart_opts' setting
+  foreach my $mysqld ( mysqlds() )
+  {
+    delete $mysqld->{'restart_opts'};
   }
 }
 

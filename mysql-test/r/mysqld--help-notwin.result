@@ -12,6 +12,8 @@ The following options may be given as the first argument:
  Option used by mysql-test for debugging and testing of
  replication.
  --admin-port=#      Port number to use for connections from admin.
+ --admission-control-by-trx 
+ Allow open transactions to go through admission control
  --admission-control-filter=name 
  Commands that are skipped in admission control checks.
  The legal values are: ALTER, BEGIN, COMMIT, CREATE,
@@ -579,6 +581,13 @@ The following options may be given as the first argument:
  --min-examined-row-limit=# 
  Don't write queries to slow log that examine fewer rows
  than that
+ --mts-dynamic-rebalance 
+ Shuffle DB's within workers periodically for load
+ balancing
+ --mts-imbalance-threshold[=#] 
+ Threshold to trigger worker thread rebalancing. This
+ parameter denotes the percent load on the most loaded
+ worker.
  --multi-range-count=# 
  Number of key ranges to request at once. This variable
  has no effect, and is deprecated. It will be removed in a
@@ -1018,6 +1027,7 @@ The following options may be given as the first argument:
  (Defaults to on; use --skip-rocksdb-advise-random-on-open to disable.)
  --rocksdb-allow-concurrent-memtable-write 
  DBOptions::allow_concurrent_memtable_write for RocksDB
+ (Defaults to on; use --skip-rocksdb-allow-concurrent-memtable-write to disable.)
  --rocksdb-allow-mmap-reads 
  DBOptions::allow_mmap_reads for RocksDB
  --rocksdb-allow-mmap-writes 
@@ -1125,6 +1135,7 @@ The following options may be given as the first argument:
  DBOptions::enable_thread_tracking for RocksDB
  --rocksdb-enable-write-thread-adaptive-yield 
  DBOptions::enable_write_thread_adaptive_yield for RocksDB
+ (Defaults to on; use --skip-rocksdb-enable-write-thread-adaptive-yield to disable.)
  --rocksdb-error-if-exists 
  DBOptions::error_if_exists for RocksDB
  --rocksdb-flush-memtable-on-analyze 
@@ -1266,6 +1277,8 @@ The following options may be given as the first argument:
  statistics about table properties. Specify either 0 to
  sample everything or percentage [1..100]. By default 10%
  of entries are sampled.
+ --rocksdb-tmpdir[=name] 
+ Directory for temporary files during DDL operations.
  --rocksdb-trace-sst-api 
  Generate trace output in the log for each call to the
  SstFileWriter
@@ -1448,6 +1461,12 @@ The following options may be given as the first argument:
  ALL_UNSIGNED. If the variable is assigned the empty set,
  no conversions are allowed and it is expected that the
  types match exactly.
+ --slave-use-idempotent-for-recovery=name 
+ Modes for how replication events should be executed
+ during recovery. Legal values are NO (default) and YES.
+ YES means replication will not stop for operations that
+ are idempotent. Note that binlog format must be ROW and
+ GTIDs should be enabled for this option to have effect.
  --slow-launch-time=# 
  If creating the thread takes longer than this value (in
  seconds), the Slow_launch_threads counter will be
@@ -1593,6 +1612,7 @@ The following options may be given as the first argument:
 Variables (--variable-name=value)
 abort-slave-event-count 0
 admin-port 0
+admission-control-by-trx FALSE
 admission-control-filter 
 allow-document-type FALSE
 allow-multiple-engines FALSE
@@ -1769,6 +1789,8 @@ memlock FALSE
 metadata-locks-cache-size 1024
 metadata-locks-hash-instances 256
 min-examined-row-limit 0
+mts-dynamic-rebalance FALSE
+mts-imbalance-threshold 90
 multi-range-count 256
 myisam-block-size 1024
 myisam-data-pointer-size 6
@@ -1886,13 +1908,13 @@ reset-seconds-behind-master TRUE
 rocksdb ON
 rocksdb-access-hint-on-compaction-start 1
 rocksdb-advise-random-on-open TRUE
-rocksdb-allow-concurrent-memtable-write FALSE
+rocksdb-allow-concurrent-memtable-write TRUE
 rocksdb-allow-mmap-reads FALSE
 rocksdb-allow-mmap-writes FALSE
 rocksdb-allow-os-buffer TRUE
 rocksdb-background-sync FALSE
 rocksdb-base-background-compactions 1
-rocksdb-block-cache-size 8388608
+rocksdb-block-cache-size 536870912
 rocksdb-block-restart-interval 16
 rocksdb-block-size 4096
 rocksdb-block-size-deviation 10
@@ -1927,7 +1949,7 @@ rocksdb-disable-2pc TRUE
 rocksdb-disabledatasync FALSE
 rocksdb-enable-bulk-load-api TRUE
 rocksdb-enable-thread-tracking FALSE
-rocksdb-enable-write-thread-adaptive-yield FALSE
+rocksdb-enable-write-thread-adaptive-yield TRUE
 rocksdb-error-if-exists FALSE
 rocksdb-flush-memtable-on-analyze TRUE
 rocksdb-force-flush-memtable-now FALSE
@@ -1980,6 +2002,7 @@ rocksdb-strict-collation-check TRUE
 rocksdb-strict-collation-exceptions (No default value)
 rocksdb-table-cache-numshardbits 6
 rocksdb-table-stats-sampling-pct 10
+rocksdb-tmpdir (No default value)
 rocksdb-trace-sst-api FALSE
 rocksdb-trx ON
 rocksdb-unsafe-for-binlog FALSE
@@ -2035,6 +2058,7 @@ slave-skip-errors (No default value)
 slave-sql-verify-checksum TRUE
 slave-transaction-retries 10
 slave-type-conversions 
+slave-use-idempotent-for-recovery NO
 slow-launch-time 2
 slow-log-if-rows-examined-exceed 0
 slow-query-log FALSE

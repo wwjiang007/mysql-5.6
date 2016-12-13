@@ -46,7 +46,6 @@
 #include "rocksdb/slice_transform.h"
 #include "rocksdb/utilities/checkpoint.h"
 #include "rocksdb/utilities/convenience.h"
-#include "rocksdb/utilities/flashcache.h"
 #include "rocksdb/utilities/memory_util.h"
 
 /* MyRocks includes */
@@ -60,10 +59,6 @@
 #include "./rdb_index_merge.h"
 #include "./rdb_mutex_wrapper.h"
 #include "./rdb_threads.h"
-
-#ifdef TARGET_OS_LINUX
-extern my_bool cachedev_enabled;
-#endif /* TARGET_OS_LINUX */
 
 // Internal MySQL APIs not exposed in any header.
 extern "C"
@@ -140,6 +135,7 @@ static std::shared_ptr<Rdb_tbl_prop_coll_factory>
 Rdb_dict_manager dict_manager;
 Rdb_cf_manager cf_manager;
 Rdb_ddl_manager ddl_manager;
+const char* m_mysql_gtid;
 Rdb_binlog_manager binlog_manager;
 
 
@@ -500,6 +496,11 @@ static MYSQL_SYSVAR_BOOL(enable_bulk_load_api,
   "Enables using SstFileWriter for bulk loading",
   nullptr, nullptr, rocksdb_enable_bulk_load_api);
 
+static MYSQL_THDVAR_STR(tmpdir,
+  PLUGIN_VAR_OPCMDARG|PLUGIN_VAR_MEMALLOC,
+  "Directory for temporary files during DDL operations.",
+  nullptr, nullptr, "");
+
 static MYSQL_THDVAR_STR(skip_unique_check_tables,
   PLUGIN_VAR_RQCMDARG|PLUGIN_VAR_MEMALLOC,
   "Skip unique constraint checking for the specified tables", nullptr, nullptr,
@@ -843,7 +844,7 @@ static MYSQL_SYSVAR_BOOL(enable_thread_tracking,
 static MYSQL_SYSVAR_LONGLONG(block_cache_size, rocksdb_block_cache_size,
   PLUGIN_VAR_RQCMDARG | PLUGIN_VAR_READONLY,
   "block_cache size for RocksDB",
-  nullptr, nullptr, /* RocksDB's default is 8 MB: */ 8*1024*1024L,
+  nullptr, nullptr, 512*1024*1024L,
   /* min */ 1024L, /* max */ LONGLONG_MAX, /* Block size */1024L);
 
 static MYSQL_SYSVAR_BOOL(cache_index_and_filter_blocks,
@@ -1130,7 +1131,6 @@ static MYSQL_SYSVAR_UINT(
   RDB_DEFAULT_TBL_STATS_SAMPLE_PCT, /* everything */ 0,
   /* max */ RDB_TBL_STATS_SAMPLE_PCT_MAX, 0);
 
-static const longlong ROCKSDB_WRITE_BUFFER_SIZE_DEFAULT= 4194304;
 static const int ROCKSDB_ASSUMED_KEY_VALUE_DISK_SIZE= 100;
 
 static struct st_mysql_sys_var* rocksdb_system_variables[]= {
@@ -1148,6 +1148,7 @@ static struct st_mysql_sys_var* rocksdb_system_variables[]= {
   MYSQL_SYSVAR(bulk_load_size),
   MYSQL_SYSVAR(merge_buf_size),
   MYSQL_SYSVAR(enable_bulk_load_api),
+  MYSQL_SYSVAR(tmpdir),
   MYSQL_SYSVAR(merge_combine_read_size),
   MYSQL_SYSVAR(skip_bloom_filter_on_read),
 
@@ -1486,6 +1487,7 @@ public:
   const char* m_mysql_log_file_name;
   my_off_t m_mysql_log_offset;
   const char* m_mysql_gtid;
+  const char* m_mysql_max_gtid;
   String m_detailed_error;
   int64_t m_snapshot_timestamp= 0;
   bool m_ddl_transaction;
@@ -1672,10 +1674,11 @@ public:
     else
     {
       my_core::thd_binlog_pos(m_thd, &m_mysql_log_file_name,
-                              &m_mysql_log_offset, &m_mysql_gtid);
+                              &m_mysql_log_offset, &m_mysql_gtid,
+                              &m_mysql_max_gtid);
       binlog_manager.update(m_mysql_log_file_name,
                             m_mysql_log_offset,
-                            m_mysql_gtid, get_write_batch());
+                            m_mysql_max_gtid, get_write_batch());
       return commit_no_binlog();
     }
   }
@@ -1814,7 +1817,7 @@ public:
                               std::string* value) const= 0;
   virtual rocksdb::Status get_for_update(
     rocksdb::ColumnFamilyHandle* column_family,
-    const rocksdb::Slice& key, std::string* value)= 0;
+    const rocksdb::Slice& key, std::string* value, bool exclusive)= 0;
 
   rocksdb::Iterator *get_iterator(rocksdb::ColumnFamilyHandle* column_family,
                                   bool skip_bloom_filter,
@@ -2135,12 +2138,13 @@ class Rdb_transaction_impl : public Rdb_transaction
 
   rocksdb::Status get_for_update(rocksdb::ColumnFamilyHandle* column_family,
                                  const rocksdb::Slice& key,
-                                 std::string* value) override
+                                 std::string* value, bool exclusive) override
   {
     if (++m_lock_count > m_max_row_locks)
       return rocksdb::Status::Aborted(rocksdb::Status::kLockLimit);
 
-    return m_rocksdb_tx->GetForUpdate(m_read_opts, column_family, key, value);
+    return m_rocksdb_tx->GetForUpdate(m_read_opts, column_family, key, value,
+                                      exclusive);
   }
 
   rocksdb::Iterator *get_iterator(const rocksdb::ReadOptions &options,
@@ -2390,7 +2394,7 @@ class Rdb_writebatch_impl : public Rdb_transaction
 
   rocksdb::Status get_for_update(rocksdb::ColumnFamilyHandle* column_family,
                                  const rocksdb::Slice& key,
-                                 std::string* value) override
+                                 std::string* value, bool exclusive) override
   {
     return get(column_family, key, value);
   }
@@ -2697,7 +2701,8 @@ static void rdb_xid_from_string(const std::string& src, XID *dst)
   The info is needed for crash safe slave/master to work.
 */
 static int rocksdb_recover(handlerton* hton, XID* xid_list, uint len,
-                           char* binlog_file, my_off_t* binlog_pos)
+                           char* binlog_file, my_off_t* binlog_pos,
+                           Gtid* binlog_max_gtid)
 {
   if (binlog_file && binlog_pos)
   {
@@ -2714,6 +2719,9 @@ static int rocksdb_recover(handlerton* hton, XID* xid_list, uint len,
                 " file name %s\n", pos, file_buf);
         if (*gtid_buf)
         {
+          global_sid_lock->rdlock();
+          binlog_max_gtid->parse(global_sid_map, gtid_buf);
+          global_sid_lock->unlock();
           fprintf(stderr, "RocksDB: Last MySQL Gtid %s\n", gtid_buf);
         }
       }
@@ -2844,20 +2852,47 @@ static std::string format_string(
   std::string res;
   va_list     args;
   va_list     args_copy;
+  char        static_buff[256];
 
   va_start(args, format);
   va_copy(args_copy, args);
 
-  size_t len = vsnprintf(nullptr, 0, format, args) + 1;
+  // Calculate how much space we will need
+  int len = vsnprintf(nullptr, 0, format, args);
   va_end(args);
 
-  if (len == 0) {
+  if (len < 0)
+  {
+    res = std::string("<format error>");
+  }
+  else if (len == 0)
+  {
+    // Shortcut for an empty string
     res = std::string("");
   }
-  else {
-    char buff[len];
+  else
+  {
+    // For short enough output use a static buffer
+    char*                   buff= static_buff;
+    std::unique_ptr<char[]> dynamic_buff= nullptr;
+
+    len++;  // Add one for null terminator
+
+    // for longer output use an allocated buffer
+    if (static_cast<uint>(len) > sizeof(static_buff))
+    {
+      dynamic_buff.reset(new char[len]);
+      buff= dynamic_buff.get();
+    }
+
+    // Now re-do the vsnprintf with the buffer which is now large enough
     (void) vsnprintf(buff, len, format, args_copy);
 
+    // Convert to a std::string.  Note we could have created a std::string
+    // large enough and then converted the buffer to a 'char*' and created
+    // the output in place.  This would probably work but feels like a hack.
+    // Since this isn't code that needs to be super-performant we are going
+    // with this 'safer' method.
     res = std::string(buff);
   }
 
@@ -2974,7 +3009,8 @@ class Rdb_trx_info_aggregator : public Rdb_tx_list_walker
                             0, /* lock_count */
                             0, /* timeout_sec */
                             "", /* state */
-                            0, /* waiting_trx_id */
+                            "", /* waiting_key */
+                            0, /* waiting_cf_id */
                             1, /*is_replication */
                             1, /* skip_trx_api */
                             wb_impl->is_tx_read_only(),
@@ -3000,6 +3036,9 @@ class Rdb_trx_info_aggregator : public Rdb_tx_list_walker
       auto state_it = state_map.find(rdb_trx->GetState());
       DBUG_ASSERT(state_it != state_map.end());
       int is_replication = (thd->rli_slave != nullptr);
+      uint32_t waiting_cf_id;
+      std::string waiting_key;
+      rdb_trx->GetWaitingTxns(&waiting_cf_id, &waiting_key),
 
       m_trx_info->push_back({rdb_trx->GetName(),
                             rdb_trx->GetID(),
@@ -3007,7 +3046,8 @@ class Rdb_trx_info_aggregator : public Rdb_tx_list_walker
                             tx_impl->get_lock_count(),
                             tx_impl->get_timeout_sec(),
                             state_it->second,
-                            rdb_trx->GetWaitingTxn(nullptr, nullptr),
+                            waiting_key,
+                            waiting_cf_id,
                             is_replication,
                             0, /* skip_trx_api */
                             tx_impl->is_tx_read_only(),
@@ -3569,7 +3609,7 @@ static int rocksdb_init_func(void *p)
     mysql_mutex_unlock(&rdb_sysvars_mutex);
   }
 
-  if (!rocksdb_cf_options_map.init(ROCKSDB_WRITE_BUFFER_SIZE_DEFAULT,
+  if (!rocksdb_cf_options_map.init(
                                    rocksdb_tbl_options,
                                    properties_collector_factory,
                                    rocksdb_default_cf_options,
@@ -3614,33 +3654,6 @@ static int rocksdb_init_func(void *p)
 
   rocksdb::Options main_opts(rocksdb_db_options,
                              rocksdb_cf_options_map.get_defaults());
-
-  /*
-    Flashcache configuration:
-    When running on Flashcache, mysqld opens Flashcache device before
-    initializing storage engines, and setting file descriptor at
-    cachedev_fd global variable.
-    RocksDB has Flashcache-aware configuration. When this is enabled,
-    RocksDB adds background threads into Flashcache blacklists, which
-    makes sense for Flashcache use cases.
-  */
-  if (cachedev_enabled)
-  {
-    flashcache_aware_env=
-      rocksdb::NewFlashcacheAwareEnv(rocksdb::Env::Default(),
-                                     cachedev_fd);
-    if (flashcache_aware_env.get() == nullptr)
-    {
-      // NO_LINT_DEBUG
-      sql_print_error("RocksDB: Failed to open flashcache device at fd %d",
-                      cachedev_fd);
-      rdb_open_tables.free_hash();
-      DBUG_RETURN(1);
-    }
-    sql_print_information("RocksDB: Disabling flashcache on background "
-                          "writer threads, fd %d", cachedev_fd);
-    main_opts.env= flashcache_aware_env.get();
-  }
 
   main_opts.env->SetBackgroundThreads(main_opts.max_background_flushes,
                                       rocksdb::Env::Priority::HIGH);
@@ -4971,6 +4984,18 @@ int ha_rocksdb::open(const char *name, int mode, uint test_if_locked)
   {
     DBUG_RETURN(err);
   }
+
+  /*
+    init_with_fields() is used to initialize table flags based on the field
+    definitions in table->field[].
+    It is called by open_binary_frm(), but that function calls the method for
+    a temporary ha_rocksdb object which is later destroyed.
+
+    If we are here in ::open(), then init_with_fields() has not been called
+    for this object. Call it ourselves, we want all member variables to be
+    properly initialized.
+  */
+  init_with_fields();
 
   setup_field_converters();
 
@@ -6866,7 +6891,10 @@ rocksdb::Status ha_rocksdb::get_for_update(
     const rocksdb::Slice&        key,
     std::string*                 value) const
 {
-  rocksdb::Status s= tx->get_for_update(column_family, key, value);
+  DBUG_ASSERT(m_lock_rows != RDB_LOCK_NONE);
+  bool exclusive = m_lock_rows != RDB_LOCK_READ;
+
+  rocksdb::Status s= tx->get_for_update(column_family, key, value, exclusive);
 
   // If we have a lock conflict and we are running in READ COMMITTTED mode
   // release and reacquire the snapshot and then retry the get_for_update().
@@ -6876,7 +6904,7 @@ rocksdb::Status ha_rocksdb::get_for_update(
     tx->release_snapshot();
     tx->acquire_snapshot(false);
 
-    s= tx->get_for_update(column_family, key, value);
+    s= tx->get_for_update(column_family, key, value, exclusive);
   }
 
   return s;
@@ -8762,7 +8790,7 @@ THR_LOCK_DATA **ha_rocksdb::store_lock(THD *thd,
         The following logic was copied directly from
         ha_innobase::store_lock_with_x_type() in
         storage/innobase/handler/ha_innodb.cc and causes MyRocks to leave
-        locks in place on rows that are in a table that is not beint updated.
+        locks in place on rows that are in a table that is not being updated.
       */
       uint sql_command = my_core::thd_sql_command(thd);
       if ((lock_type == TL_READ && in_lock_tables) ||
@@ -8827,6 +8855,21 @@ void ha_rocksdb::read_thd_vars(THD *thd)
   m_store_row_debug_checksums= THDVAR(thd, store_row_debug_checksums);
   m_verify_row_debug_checksums= THDVAR(thd, verify_row_debug_checksums);
   m_checksums_pct= THDVAR(thd, checksums_pct);
+}
+
+const char* ha_rocksdb::thd_rocksdb_tmpdir()
+{
+  const char* tmp_dir = THDVAR(ha_thd(), tmpdir);
+
+  /*
+    We want to treat an empty string as nullptr, in these cases DDL operations
+    will use the default --tmpdir passed to mysql instead.
+  */
+  if (tmp_dir != nullptr && *tmp_dir == '\0') {
+    tmp_dir= nullptr;
+  }
+
+  return(tmp_dir);
 }
 
 int ha_rocksdb::external_lock(THD *thd, int lock_type)
@@ -9572,7 +9615,7 @@ int ha_rocksdb::analyze(THD* thd, HA_CHECK_OPT* check_opt)
   DBUG_RETURN(0);
 }
 
-void ha_rocksdb::get_auto_increment(ulonglong offset, ulonglong increment,
+void ha_rocksdb::get_auto_increment(ulonglong off, ulonglong inc,
                                     ulonglong nb_desired_values,
                                     ulonglong *first_value,
                                     ulonglong *nb_reserved_values)
@@ -9592,7 +9635,49 @@ void ha_rocksdb::get_auto_increment(ulonglong offset, ulonglong increment,
     m_auto_incr_val this should be safe - if we had to grab a mutex, doing
     an actual reserve of some values might be a better solution.
    */
-  *first_value= m_tbl_def->m_auto_incr_val++;
+  DEBUG_SYNC(ha_thd(), "rocksdb.autoinc_vars");
+
+  if (off > inc)
+  {
+    off= 1;
+  }
+
+  // Local variable reference to simplify code below
+  std::atomic<longlong>& auto_incr= m_tbl_def->m_auto_incr_val;
+
+  if (inc == 1 && off == 1)
+  {
+    // Optimization for the standard case where we are always simply
+    // incrementing from the last position
+    *first_value= auto_incr++;
+  }
+  else
+  {
+    // The next value can be more complicated if either `inc` or 'off' is not 1
+    longlong new_val;
+    longlong last_val= auto_incr;
+
+    // Loop until we can correctly update the atomic value
+    do
+    {
+      // Calculate the next value in the auto increment series:
+      //   offset + N * increment
+      // where N is 0, 1, 2, ...
+      //
+      // For further information please visit:
+      // http://dev.mysql.com/doc/refman/5.7/en/replication-options-master.html
+      new_val= ((last_val + (inc - off) - 1) / inc) * inc + off;
+
+      // Attempt to store the new value (plus 1 since m_auto_incr_val contains
+      // the next available value) into the atomic value.  If the current
+      // value no longer matches what we have in 'last_val' this will fail and
+      // we will repeat the loop (`last_val` will automatically get updated
+      // with the current value).
+    } while (!auto_incr.compare_exchange_weak(last_val, new_val + 1));
+
+    *first_value= new_val;
+  }
+
   *nb_reserved_values= 1;
 }
 
@@ -9994,7 +10079,8 @@ int ha_rocksdb::inplace_populate_sk(const TABLE* new_table_arg,
   for (auto& index : indexes)
   {
     const rocksdb::Comparator* index_comp= index->get_cf()->GetComparator();
-    Rdb_index_merge rdb_merge(rdb_merge_buf_size, rdb_merge_combine_read_size,
+    Rdb_index_merge rdb_merge(thd_rocksdb_tmpdir(), rdb_merge_buf_size,
+                              rdb_merge_combine_read_size,
                               index_comp);
 
     if ((res= rdb_merge.init()))
@@ -10322,7 +10408,6 @@ struct rocksdb_status_counters_t {
   uint64_t number_multiget_bytes_read;
   uint64_t number_deletes_filtered;
   uint64_t number_merge_failures;
-  uint64_t sequence_number;
   uint64_t bloom_filter_prefix_checked;
   uint64_t bloom_filter_prefix_useful;
   uint64_t number_reseeks_iteration;
@@ -10379,7 +10464,6 @@ DEF_SHOW_FUNC(number_multiget_keys_read, NUMBER_MULTIGET_KEYS_READ)
 DEF_SHOW_FUNC(number_multiget_bytes_read, NUMBER_MULTIGET_BYTES_READ)
 DEF_SHOW_FUNC(number_deletes_filtered, NUMBER_FILTERED_DELETES)
 DEF_SHOW_FUNC(number_merge_failures, NUMBER_MERGE_FAILURES)
-DEF_SHOW_FUNC(sequence_number, SEQUENCE_NUMBER)
 DEF_SHOW_FUNC(bloom_filter_prefix_checked, BLOOM_FILTER_PREFIX_CHECKED)
 DEF_SHOW_FUNC(bloom_filter_prefix_useful, BLOOM_FILTER_PREFIX_USEFUL)
 DEF_SHOW_FUNC(number_reseeks_iteration, NUMBER_OF_RESEEKS_IN_ITERATION)
@@ -10472,7 +10556,6 @@ static SHOW_VAR rocksdb_status_vars[]= {
   DEF_STATUS_VAR(number_multiget_bytes_read),
   DEF_STATUS_VAR(number_deletes_filtered),
   DEF_STATUS_VAR(number_merge_failures),
-  DEF_STATUS_VAR(sequence_number),
   DEF_STATUS_VAR(bloom_filter_prefix_checked),
   DEF_STATUS_VAR(bloom_filter_prefix_useful),
   DEF_STATUS_VAR(number_reseeks_iteration),
@@ -10517,17 +10600,23 @@ static SHOW_VAR rocksdb_status_vars[]= {
 
 void Rdb_background_thread::run()
 {
+  // How many seconds to wait till flushing the WAL next time.
+  const int WAKE_UP_INTERVAL = 1;
+
   timespec ts_next_sync;
   clock_gettime(CLOCK_REALTIME, &ts_next_sync);
-  ts_next_sync.tv_sec++;
+  ts_next_sync.tv_sec += WAKE_UP_INTERVAL;
 
   for (;;)
   {
-    // wait for 1 second or until we received a condition to stop the thread
+    // Wait until the next timeout or until we receive a signal to stop the
+    // thread. Request to stop the thread should only be triggered when the
+    // storage engine is being unloaded.
     mysql_mutex_lock(&m_signal_mutex);
     auto ret __attribute__((__unused__)) = mysql_cond_timedwait(
-        &m_signal_cond, &m_signal_mutex, &ts_next_sync);
-    // make sure that no program error is returned
+      &m_signal_cond, &m_signal_mutex, &ts_next_sync);
+
+    // Check that we receive only the expected error codes.
     DBUG_ASSERT(ret == 0 || ret == ETIMEDOUT);
     bool local_stop= m_stop;
     bool local_save_stats= m_save_stats;
@@ -10536,29 +10625,36 @@ void Rdb_background_thread::run()
 
     if (local_stop)
     {
+      // If we're here then that's because condition variable was signaled by
+      // another thread and we're shutting down. Break out the loop to make
+      // sure that shutdown thread can proceed.
       break;
     }
+
+    // This path should be taken only when the timer expired.
+    DBUG_ASSERT(ret == ETIMEDOUT);
 
     if (local_save_stats)
     {
       ddl_manager.persist_stats();
     }
 
-    // Flush the WAL if need be but don't do it more frequent
-    // than once per second
     timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
-    if (ts.tv_sec - ts_next_sync.tv_sec >= 1)
+
+    // Flush the WAL.
+    if (rdb && rocksdb_background_sync)
     {
-      if (rdb && rocksdb_background_sync)
-      {
-        DBUG_ASSERT(!rocksdb_db_options.allow_mmap_writes);
-        rocksdb::Status s= rdb->SyncWAL();
-        if (!s.ok())
-          rdb_handle_io_error(s, RDB_IO_ERROR_BG_THREAD);
+      DBUG_ASSERT(!rocksdb_db_options.allow_mmap_writes);
+      rocksdb::Status s= rdb->SyncWAL();
+      if (!s.ok()) {
+        rdb_handle_io_error(s, RDB_IO_ERROR_BG_THREAD);
       }
-      ts_next_sync.tv_sec= ts.tv_sec + 1;
     }
+
+    // Set the next timestamp for mysql_cond_timedwait() (which ends up calling
+    // pthread_cond_timedwait()) to wait on.
+    ts_next_sync.tv_sec= ts.tv_sec + WAKE_UP_INTERVAL;
   }
 
   // save remaining stats which might've left unsaved
