@@ -1833,6 +1833,11 @@ static Sys_var_ulong Sys_rpl_stop_slave_timeout(
        "warning.",
        GLOBAL_VAR(rpl_stop_slave_timeout), CMD_LINE(REQUIRED_ARG),
        VALID_RANGE(2, LONG_TIMEOUT), DEFAULT(LONG_TIMEOUT), BLOCK_SIZE(1));
+
+static Sys_var_mybool Sys_rpl_skip_tx_api(
+       "rpl_skip_tx_api",
+       "Use write batches for replication thread instead of tx api",
+       GLOBAL_VAR(rpl_skip_tx_api), CMD_LINE(OPT_ARG), DEFAULT(FALSE));
 /*
   alias for binlogging_imposible_mode as per the appropriate naming
   convention
@@ -3213,7 +3218,7 @@ static Sys_var_set Slave_type_conversions(
 const char *admission_control_filter_names[]=
        {"ALTER", "BEGIN", "COMMIT", "CREATE", "DELETE", "DROP",
         "INSERT", "LOAD", "SELECT", "SET", "REPLACE", "ROLLBACK", "TRUNCATE",
-        "UPDATE", "SHOW", 0};
+        "UPDATE", "SHOW", "USE", 0};
 static Sys_var_set Admission_control_options(
        "admission_control_filter",
        "Commands that are skipped in admission control checks. The legal "

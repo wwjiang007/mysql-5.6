@@ -1475,11 +1475,11 @@ void THD::init(void)
   else
     variables.option_bits&= ~OPTION_BIN_LOG;
 
-  my_io_perf_init(&io_perf_read);
-  my_io_perf_init(&io_perf_write);
-  my_io_perf_init(&io_perf_read_blob);
-  my_io_perf_init(&io_perf_read_primary);
-  my_io_perf_init(&io_perf_read_secondary);
+  io_perf_read.init();
+  io_perf_write.init();
+  io_perf_read_blob.init();
+  io_perf_read_primary.init();
+  io_perf_read_secondary.init();
   count_comment_bytes= 0;
 
 #if defined(ENABLED_DEBUG_SYNC)
@@ -1586,6 +1586,10 @@ void THD::cleanup(void)
   DEBUG_SYNC(this, "thd_cleanup_start");
 
   killed= KILL_CONNECTION;
+  if (lex)
+  {
+    lex->sql_command= SQLCOM_END;
+  }
 #ifdef ENABLE_WHEN_BINLOG_WILL_BE_ABLE_TO_PREPARE
   if (transaction.xid_state.xa_state == XA_PREPARED)
   {

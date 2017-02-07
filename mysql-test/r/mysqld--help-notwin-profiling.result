@@ -1029,14 +1029,10 @@ The following options may be given as the first argument:
  (Defaults to on; use --skip-rocksdb-advise-random-on-open to disable.)
  --rocksdb-allow-concurrent-memtable-write 
  DBOptions::allow_concurrent_memtable_write for RocksDB
- (Defaults to on; use --skip-rocksdb-allow-concurrent-memtable-write to disable.)
  --rocksdb-allow-mmap-reads 
  DBOptions::allow_mmap_reads for RocksDB
  --rocksdb-allow-mmap-writes 
  DBOptions::allow_mmap_writes for RocksDB
- --rocksdb-allow-os-buffer 
- DBOptions::allow_os_buffer for RocksDB
- (Defaults to on; use --skip-rocksdb-allow-os-buffer to disable.)
  --rocksdb-background-sync 
  turns on background syncs for RocksDB
  --rocksdb-base-background-compactions=# 
@@ -1050,9 +1046,8 @@ The following options may be given as the first argument:
  BlockBasedTableOptions::block_size for RocksDB
  --rocksdb-block-size-deviation=# 
  BlockBasedTableOptions::block_size_deviation for RocksDB
- --rocksdb-bulk-load Use bulk-load mode for inserts. This enables both
- rocksdb_skip_unique_check and
- rocksdb_commit_in_the_middle.
+ --rocksdb-bulk-load Use bulk-load mode for inserts. This disables
+ unique_checks and enables rocksdb_commit_in_the_middle.
  --rocksdb-bulk-load-size=# 
  Max #records in a batch for bulk-load mode
  --rocksdb-bytes-per-sync=# 
@@ -1093,6 +1088,10 @@ The following options may be given as the first argument:
  --rocksdb-compaction-sequential-deletes-window=# 
  Size of the window for counting
  rocksdb_compaction_sequential_deletes
+ --rocksdb-compaction-stats[=name] 
+ Enable or disable ROCKSDB_COMPACTION_STATS plugin.
+ Possible values are ON, OFF, FORCE (don't start if the
+ plugin fails to load).
  --rocksdb-create-checkpoint=name 
  Checkpoint directory
  --rocksdb-create-if-missing 
@@ -1125,11 +1124,11 @@ The following options may be given as the first argument:
  --rocksdb-delete-obsolete-files-period-micros=# 
  DBOptions::delete_obsolete_files_period_micros for
  RocksDB
- --rocksdb-disable-2pc 
- Disable two phase commit for MyRocks
- (Defaults to on; use --skip-rocksdb-disable-2pc to disable.)
  --rocksdb-disabledatasync 
  DBOptions::disableDataSync for RocksDB
+ --rocksdb-enable-2pc 
+ Enable two phase commit for MyRocks
+ (Defaults to on; use --skip-rocksdb-enable-2pc to disable.)
  --rocksdb-enable-bulk-load-api 
  Enables using SstFileWriter for bulk loading
  (Defaults to on; use --skip-rocksdb-enable-bulk-load-api to disable.)
@@ -1137,7 +1136,6 @@ The following options may be given as the first argument:
  DBOptions::enable_thread_tracking for RocksDB
  --rocksdb-enable-write-thread-adaptive-yield 
  DBOptions::enable_write_thread_adaptive_yield for RocksDB
- (Defaults to on; use --skip-rocksdb-enable-write-thread-adaptive-yield to disable.)
  --rocksdb-error-if-exists 
  DBOptions::error_if_exists for RocksDB
  --rocksdb-flush-memtable-on-analyze 
@@ -1232,6 +1230,12 @@ The following options may be given as the first argument:
  --rocksdb-perf-context-level=# 
  Perf Context Level for rocksdb internal timer stat
  collection
+ --rocksdb-persistent-cache-path=name 
+ Path for BlockBasedTableOptions::persistent_cache for
+ RocksDB
+ --rocksdb-persistent-cache-size=# 
+ Size of cache for
+ BlockBasedTableOptions::persistent_cache for RocksDB
  --rocksdb-pin-l0-filter-and-index-blocks-in-cache 
  pin_l0_filter_and_index_blocks_in_cache for RocksDB
  (Defaults to on; use --skip-rocksdb-pin-l0-filter-and-index-blocks-in-cache to disable.)
@@ -1246,9 +1250,6 @@ The following options may be given as the first argument:
  --rocksdb-records-in-range=# 
  Used to override the result of records_in_range(). Set to
  a positive number to override
- --rocksdb-rpl-skip-tx-api 
- Use write batches for replication thread instead of tx
- api
  --rocksdb-seconds-between-stat-computes=# 
  Sets a number of seconds to wait between optimizer stats
  recomputation. Only changed indexes will be refreshed.
@@ -1258,8 +1259,6 @@ The following options may be given as the first argument:
  Skip using bloom filter for reads
  --rocksdb-skip-fill-cache 
  Skip filling block cache on read requests
- --rocksdb-skip-unique-check 
- Skip unique constraint checking for all tables
  --rocksdb-skip-unique-check-tables=name 
  Skip unique constraint checking for the specified tables
  --rocksdb-stats-dump-period-sec=# 
@@ -1292,6 +1291,10 @@ The following options may be given as the first argument:
  consistency
  --rocksdb-use-adaptive-mutex 
  DBOptions::use_adaptive_mutex for RocksDB
+ --rocksdb-use-direct-reads 
+ DBOptions::use_direct_reads for RocksDB
+ --rocksdb-use-direct-writes 
+ DBOptions::use_direct_writes for RocksDB
  --rocksdb-use-fsync DBOptions::use_fsync for RocksDB
  --rocksdb-validate-tables=# 
  Verify all .frm files match all RocksDB tables (0 means
@@ -1329,6 +1332,8 @@ The following options may be given as the first argument:
  --rpl-send-buffer-size=# 
  The size of output buffer for the socket used during
  sending events to a slave.
+ --rpl-skip-tx-api   Use write batches for replication thread instead of tx
+ api
  --rpl-stop-slave-timeout=# 
  Timeout in seconds to wait for slave to stop before
  returning a warning.
@@ -1911,10 +1916,9 @@ reset-seconds-behind-master TRUE
 rocksdb ON
 rocksdb-access-hint-on-compaction-start 1
 rocksdb-advise-random-on-open TRUE
-rocksdb-allow-concurrent-memtable-write TRUE
+rocksdb-allow-concurrent-memtable-write FALSE
 rocksdb-allow-mmap-reads FALSE
 rocksdb-allow-mmap-writes FALSE
-rocksdb-allow-os-buffer TRUE
 rocksdb-background-sync FALSE
 rocksdb-base-background-compactions 1
 rocksdb-block-cache-size 536870912
@@ -1936,6 +1940,7 @@ rocksdb-compaction-sequential-deletes 0
 rocksdb-compaction-sequential-deletes-count-sd FALSE
 rocksdb-compaction-sequential-deletes-file-size 0
 rocksdb-compaction-sequential-deletes-window 0
+rocksdb-compaction-stats ON
 rocksdb-create-checkpoint 
 rocksdb-create-if-missing TRUE
 rocksdb-create-missing-column-families FALSE
@@ -1948,11 +1953,11 @@ rocksdb-debug-optimizer-n-rows 0
 rocksdb-debug-optimizer-no-zero-cardinality TRUE
 rocksdb-default-cf-options 
 rocksdb-delete-obsolete-files-period-micros 21600000000
-rocksdb-disable-2pc TRUE
 rocksdb-disabledatasync FALSE
+rocksdb-enable-2pc TRUE
 rocksdb-enable-bulk-load-api TRUE
 rocksdb-enable-thread-tracking FALSE
-rocksdb-enable-write-thread-adaptive-yield TRUE
+rocksdb-enable-write-thread-adaptive-yield FALSE
 rocksdb-error-if-exists FALSE
 rocksdb-flush-memtable-on-analyze TRUE
 rocksdb-force-flush-memtable-now FALSE
@@ -1987,17 +1992,17 @@ rocksdb-pause-background-work FALSE
 rocksdb-perf-context ON
 rocksdb-perf-context-global ON
 rocksdb-perf-context-level 0
+rocksdb-persistent-cache-path 
+rocksdb-persistent-cache-size 0
 rocksdb-pin-l0-filter-and-index-blocks-in-cache TRUE
 rocksdb-print-snapshot-conflict-queries FALSE
 rocksdb-rate-limiter-bytes-per-sec 0
 rocksdb-read-free-rpl-tables (No default value)
 rocksdb-records-in-range 0
-rocksdb-rpl-skip-tx-api FALSE
 rocksdb-seconds-between-stat-computes 3600
 rocksdb-signal-drop-index-thread FALSE
 rocksdb-skip-bloom-filter-on-read FALSE
 rocksdb-skip-fill-cache FALSE
-rocksdb-skip-unique-check FALSE
 rocksdb-skip-unique-check-tables (No default value)
 rocksdb-stats-dump-period-sec 600
 rocksdb-store-row-debug-checksums FALSE
@@ -2010,6 +2015,8 @@ rocksdb-trace-sst-api FALSE
 rocksdb-trx ON
 rocksdb-unsafe-for-binlog FALSE
 rocksdb-use-adaptive-mutex FALSE
+rocksdb-use-direct-reads FALSE
+rocksdb-use-direct-writes FALSE
 rocksdb-use-fsync FALSE
 rocksdb-validate-tables 1
 rocksdb-verify-row-debug-checksums FALSE
@@ -2026,6 +2033,7 @@ rpl-event-buffer-size 1048576
 rpl-read-size 8192
 rpl-receive-buffer-size 2097152
 rpl-send-buffer-size 2097152
+rpl-skip-tx-api FALSE
 rpl-stop-slave-timeout 604800
 safe-user-create FALSE
 secure-auth TRUE

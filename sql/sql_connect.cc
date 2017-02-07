@@ -733,16 +733,17 @@ static int check_connection(THD *thd)
     reset_host_connect_errors(thd->main_security_ctx.get_ip()->ptr());
   }
 
+  MT_RESOURCE_ATTRS attrs = {
+    &thd->connection_attrs_map,
+    &thd->query_attrs_map,
+    thd->db
+  };
   if (auth_rc == 0 &&
-      multi_tenancy_add_connection(thd, thd->connection_attrs_map))
+      multi_tenancy_add_connection(thd, &attrs))
   {
-    const char *entity = "";
-    // if the connection is rejected by multi-tenancy plugin, the entity value
-    // should be set to tell us what limit has been reached.
-    auto iter = thd->connection_attrs_map.find(multi_tenancy_entity_str);
-    if (iter != thd->connection_attrs_map.end())
-      entity = iter->second.c_str();
-    my_error(ER_MULTI_TENANCY_MAX_CONNECTION, MYF(0), entity);
+    my_error(ER_MULTI_TENANCY_MAX_CONNECTION, MYF(0),
+        thd->main_security_ctx.get_host()->length() ?
+        thd->main_security_ctx.get_host()->ptr() : "unknown host");
     return 1;
   }
 
@@ -1120,6 +1121,7 @@ void do_handle_one_connection(THD *thd_arg)
   ulong conn_timeout = 0;
   char timeout_error_msg_buf[256];
   timeout_error_msg_buf[0] = '\0';
+  MT_RESOURCE_ATTRS attrs;
 
   for (;;)
   {
@@ -1164,7 +1166,12 @@ void do_handle_one_connection(THD *thd_arg)
     }
     thd_update_net_stats(thd);
     // release connection in multi_tenancy plugin
-    multi_tenancy_close_connection(thd, thd->connection_attrs_map);
+    attrs = {
+      &thd->connection_attrs_map,
+      &thd->query_attrs_map,
+      thd->db
+    };
+    multi_tenancy_close_connection(thd, &attrs);
     end_connection(thd);
 
 end_thread:
@@ -1249,10 +1256,10 @@ void init_user_stats(USER_STATS *user_stats)
 {
   DBUG_ENTER("init_user_stats");
 
-  my_io_perf_atomic_init(&(user_stats->io_perf_read));
-  my_io_perf_atomic_init(&(user_stats->io_perf_read_blob));
-  my_io_perf_atomic_init(&(user_stats->io_perf_read_primary));
-  my_io_perf_atomic_init(&(user_stats->io_perf_read_secondary));
+  user_stats->io_perf_read.init();
+  user_stats->io_perf_read_blob.init();
+  user_stats->io_perf_read_primary.init();
+  user_stats->io_perf_read_secondary.init();
 
   user_stats->binlog_bytes_written.clear();
   user_stats->binlog_disk_reads.clear();
@@ -1368,20 +1375,17 @@ update_user_stats_after_statement(USER_STATS *us,
     us->rows_index_first.inc(thd->rows_index_first);
     us->rows_index_next.inc(thd->rows_index_next);
 
-    my_io_perf_diff(&diff_io_perf, &thd->io_perf_read, start_perf_read);
-    my_io_perf_diff(&diff_io_perf_blob, &thd->io_perf_read_blob,
-                    start_perf_read_blob);
-    my_io_perf_diff(&diff_io_perf_primary, &thd->io_perf_read_primary,
-                    start_perf_read_primary);
-    my_io_perf_diff(&diff_io_perf_secondary, &thd->io_perf_read_secondary,
-                    start_perf_read_secondary);
+    diff_io_perf.diff(thd->io_perf_read, *start_perf_read);
+    diff_io_perf_blob.diff(thd->io_perf_read_blob, *start_perf_read_blob);
+    diff_io_perf_primary.diff(thd->io_perf_read_primary,
+                    *start_perf_read_primary);
+    diff_io_perf_secondary.diff(thd->io_perf_read_secondary,
+                    *start_perf_read_secondary);
 
-    my_io_perf_sum_atomic_helper(&(us->io_perf_read), &diff_io_perf);
-    my_io_perf_sum_atomic_helper(&(us->io_perf_read_blob), &diff_io_perf_blob);
-    my_io_perf_sum_atomic_helper(&(us->io_perf_read_primary),
-                                 &diff_io_perf_primary);
-    my_io_perf_sum_atomic_helper(&(us->io_perf_read_secondary),
-                                 &diff_io_perf_secondary);
+    us->io_perf_read.sum(diff_io_perf);
+    us->io_perf_read_blob.sum(diff_io_perf_blob);
+    us->io_perf_read_primary.sum(diff_io_perf_primary);
+    us->io_perf_read_secondary.sum(diff_io_perf_secondary);
   }
   else
   {

@@ -690,6 +690,7 @@ ulong opt_max_running_queries, opt_max_waiting_queries;
 my_bool opt_admission_control_by_trx= 0;
 extern AC *db_ac;
 ulong rpl_stop_slave_timeout= LONG_TIMEOUT;
+my_bool rpl_skip_tx_api = 0;
 my_bool log_bin_use_v1_row_events= 0;
 bool thread_cache_size_specified= false;
 bool host_cache_size_specified= false;
@@ -3567,80 +3568,6 @@ void my_comp_stats_sum_atomic(comp_stats_atomic_t* sum,
   sum->decompressed_time.inc(comp_stats->decompressed_time);
   sum->compressed_primary_time.inc(comp_stats->compressed_primary_time);
   sum->compressed_primary_ok_time.inc(comp_stats->compressed_primary_ok_time);
-}
-
-/**********************************************************************
-Return a - b in diff */
-void my_io_perf_diff(my_io_perf_t* diff,
-                    const my_io_perf_t* a, const my_io_perf_t* b)
-{
-  if (a->bytes > b->bytes)
-    diff->bytes = a->bytes - b->bytes;
-  else
-    diff->bytes = 0;
-
-  if (a->requests > b->requests)
-    diff->requests = a->requests - b->requests;
-  else
-    diff->requests = 0;
-
-  if (a->svc_time > b->svc_time)
-    diff->svc_time = a->svc_time - b->svc_time;
-  else
-    diff->svc_time = 0;
-
-  if (a->wait_time > b->wait_time)
-    diff->wait_time = a->wait_time - b->wait_time;
-  else
-    diff->wait_time = 0;
-
-  if (a->slow_ios > b->slow_ios)
-    diff->slow_ios = a->slow_ios - b->slow_ios;
-  else
-    diff->slow_ios = 0;
-
-  diff->svc_time_max = max(a->svc_time_max, b->svc_time_max);
-  diff->wait_time_max = max(a->wait_time_max, b->wait_time_max);
-}
-
-/**********************************************************************
-Accumulate per-table IO stats helper function */
-void my_io_perf_sum(my_io_perf_t* sum, const my_io_perf_t* perf)
-{
-  sum->bytes += perf->bytes;
-  sum->requests += perf->requests;
-  sum->svc_time += perf->svc_time;
-  sum->svc_time_max = max(sum->svc_time_max, perf->svc_time_max);
-  sum->wait_time += perf->wait_time;
-  sum->wait_time_max = max(sum->wait_time_max, perf->wait_time_max);
-  sum->slow_ios += perf->slow_ios;
-}
-
-/**********************************************************************
-Accumulate per-table IO stats helper function using atomic ops */
-void my_io_perf_sum_atomic(
-    my_io_perf_atomic_t* sum,
-    ulonglong bytes,
-    ulonglong requests,
-    ulonglong svc_time,
-    ulonglong wait_time,
-    ulonglong slow_ios)
-{
-  sum->bytes.inc(bytes);
-  sum->requests.inc(requests);
-
-  sum->svc_time.inc(svc_time);
-  sum->wait_time.inc(wait_time);
-
-  // In the unlikely case that two threads attempt to update the max
-  // value at the same time, only the first will succeed.  It's possible
-  // that the second thread would have set a larger max value, but we
-  // would rather error on the side of simplicity and avoid looping the
-  // compare-and-swap.
-  sum->svc_time_max.set_max_maybe(svc_time);
-  sum->wait_time_max.set_max_maybe(wait_time);
-
-  sum->slow_ios.inc(slow_ios);
 }
 
 /**
